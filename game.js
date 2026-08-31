@@ -13,7 +13,7 @@ import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 
 /* ─────────── 配置 ─────────── */
 const GAME_TIME = 300;            // 一轮 300 秒
-const GAME_VERSION = 'v2.2';     // 版本号（封面显示，更新时改这里）
+const GAME_VERSION = 'v2.4';     // 版本号（封面显示，更新时改这里）
 const BONE_COUNT = 5;             // 每局缺失骨数量
 const HIT_RADIUS = 0.14;          // 抛掷命中判定半径（NDC）
 const PLANE_Z = -1.0;             // 游戏物体所在深度平面
@@ -312,9 +312,8 @@ function possess() {
   $('btn-mute').classList.remove('hidden');
   updateTargets();
   sfx && sfx.whoosh();
-  /* 演示模式直接进入第一块骨的抛掷；正常模式提示玩家查看骨袋 */
-  if (DEMO) startThrow(missingBones[0]);
-  else toast('👻 恶灵附身！5 块骨头被黑雾吞噬，点击下方骨袋查看');
+  /* 演示模式与真实模式行为一致：附身后由玩家自己点骨袋选骨 */
+  toast('👻 恶灵附身！5 块骨头被黑雾吞噬，点击下方骨袋查看');
 }
 
 /* ⚠️ 目标位置必须用骨骼形状的几何中心，不能用网格原点（网格 position 在骨骼"根部"，长骨偏差很大） */
@@ -485,7 +484,7 @@ function initDrag() {
   dragGuide = new Line2(
     new LineGeometry(),
     new LineMaterial({
-      color: 0x00e5ff, linewidth: 6, transparent: true, opacity: 1.0,
+      color: 0x00e5ff, linewidth: 4, transparent: true, opacity: 1.0,
       dashed: true, dashSize: 0.06, gapSize: 0.04,
       resolution: new THREE.Vector2(innerWidth, innerHeight),
       depthTest: false,
