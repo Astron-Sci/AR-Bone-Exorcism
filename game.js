@@ -5,6 +5,7 @@
    ═══════════════════════════════════════════════════════════════ */
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 /* ─────────── 配置 ─────────── */
@@ -14,7 +15,18 @@ const HIT_RADIUS = 0.14;          // 抛掷命中判定半径（NDC）
 const PLANE_Z = -1.0;             // 游戏物体所在深度平面
 const CAM_FOV = 62;               // 相机垂直视场（度）
 const DEMO = new URLSearchParams(location.search).has('demo');
-const MODEL_PATH = 'models/skeleton.glb';
+const MODEL_PATH = 'models/skeleton_draco.glb';
+const IS_MOBILE = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || navigator.maxTouchPoints > 0;
+
+/* ⚠️ 崩溃日志：页面被杀/报错前记录，便于诊断自动重载 */
+try {
+  window.addEventListener('error', e => {
+    localStorage.setItem('bone_exorcism_err', JSON.stringify({ t: Date.now(), msg: String(e.message).slice(0, 200), src: (e.filename || '').slice(-60) }));
+  });
+  window.addEventListener('unhandledrejection', e => {
+    localStorage.setItem('bone_exorcism_err', JSON.stringify({ t: Date.now(), msg: 'rejection: ' + String(e.reason).slice(0, 200) }));
+  });
+} catch (e) { /* ignore */ }
 
 /* 缺失骨池：en=模型网格名, cn=中文名, hint=教学提示, c=目标色 */
 const BONE_POOL = [
@@ -100,8 +112,8 @@ function initAudio() {
 }
 
 /* ─────────── Three.js 主场景 ─────────── */
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const renderer = new THREE.WebGLRenderer({ antialias: !IS_MOBILE, alpha: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, IS_MOBILE ? 1 : 2)); // 手机降分辨率省内存
 renderer.setSize(innerWidth, innerHeight);
 $('three-container').appendChild(renderer.domElement);
 
@@ -149,7 +161,12 @@ scene.add(rig);
 /* ─────────── 模型加载 ─────────── */
 function loadModel() {
   return new Promise((resolve, reject) => {
-    new GLTFLoader().load(MODEL_PATH, gltf => {
+    const loader = new GLTFLoader();
+    /* Draco 解码器本地化（不走 CDN，手机加载快） */
+    const draco = new DRACOLoader();
+    draco.setDecoderPath('lib/draco/');
+    loader.setDRACOLoader(draco);
+    loader.load(MODEL_PATH, gltf => {
       skeleton = gltf.scene;
       rig.add(skeleton);
       skeleton.traverse(o => { if (o.isMesh) boneMeshes[o.name] = o; });
@@ -172,7 +189,7 @@ function loadModel() {
 async function startCamera() {
   if (DEMO) return; // 演示模式不请求摄像头
   const stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+    video: { facingMode: { ideal: 'environment' }, width: { ideal: IS_MOBILE ? 640 : 1280 }, height: { ideal: IS_MOBILE ? 480 : 720 } },
     audio: false,
   });
   video.srcObject = stream;
@@ -191,7 +208,7 @@ async function initPose() {
   poseLib = lib;
   pose = new lib.Pose({ locateFile: f => lib.base + f });
   pose.setOptions({
-    modelComplexity: 1,
+    modelComplexity: IS_MOBILE ? 0 : 1,   // 手机用 lite 模型省内存
     smoothLandmarks: true,
     enableSegmentation: false,
     minDetectionConfidence: 0.5,
@@ -421,6 +438,58 @@ function flashBone(mesh, color) {
 }
 
 /* ─────────── 抛掷系统 ─────────── */
+/* 瞄准线：预测抛射轨迹（骨球→落点）+ 落点标记环 */
+let aimLine = null, aimRing = null, aimLinePts = [];
+function initAim() {
+  if (aimLine) return;
+  const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+  const mat = new THREE.LineDashedMaterial({ color: 0x7fd8ff, dashSize: 0.05, gapSize: 0.035, transparent: true, opacity: 0.65, depthWrite: false });
+  aimLine = new THREE.Line(geo, mat);
+  aimLine.frustumCulled = false;
+  scene.add(aimLine);
+  aimRing = new THREE.Mesh(
+    new THREE.RingGeometry(0.045, 0.06, 24),
+    new THREE.MeshBasicMaterial({ color: 0xffd76a, transparent: true, opacity: 0.9, side: THREE.DoubleSide, depthWrite: false })
+  );
+  aimRing.rotation.x = -Math.PI / 2;
+  aimRing.frustumCulled = false;
+  scene.add(aimRing);
+}
+function aimTargetNdc() {
+  const bone = currentBone;
+  if (!bone) return null;
+  const w = bone.mesh.getWorldPosition(new THREE.Vector3());
+  const tgt = worldToNdc(w);
+  tgt.x = Math.max(-0.92, Math.min(0.92, tgt.x));
+  tgt.y = Math.max(-0.92, Math.min(0.92, tgt.y));
+  return tgt;
+}
+function updateAimLine(vel) {
+  if (state !== ST.THROWING || flying || !currentBone || !aimLine) { hideAimLine(); return; }
+  const tgt = aimTargetNdc();
+  if (!tgt) { hideAimLine(); return; }
+  const v = vel || { x: 0, y: 0 };
+  const land = {
+    x: Math.max(-0.98, Math.min(0.98, tgt.x + v.x * 0.35)),
+    y: Math.max(-0.98, Math.min(0.98, tgt.y + v.y * 0.35)),
+  };
+  const p0 = ndcToWorld(0, -0.72);
+  const p1 = ndcToWorld(land.x, land.y);
+  const mid = new THREE.Vector3((p0.x + p1.x) / 2, Math.max(p0.y, p1.y) + 0.55, PLANE_Z);
+  aimLinePts = [];
+  for (let i = 0; i <= 22; i++) aimLinePts.push(bez3(p0, p1, mid, i / 22));
+  aimLine.geometry.setFromPoints(aimLinePts);
+  aimLine.geometry.computeBoundingSphere();
+  aimLine.computeLineDistances();
+  aimLine.visible = true;
+  aimRing.position.copy(p1);
+  aimRing.visible = true;
+}
+function hideAimLine() {
+  if (aimLine) aimLine.visible = false;
+  if (aimRing) aimRing.visible = false;
+}
+
 function startThrow(bone) {
   currentBone = bone;
   state = ST.THROWING;
@@ -428,12 +497,16 @@ function startThrow(bone) {
   $('throw-mode').classList.remove('hidden');
   $('throw-ball-name').textContent = bone.cn;
   $('throw-ball-icon').textContent = '🦴';
+  initAim();
+  initTrail();
   updateTargets();
+  updateAimLine();
 }
 
 function exitThrowMode() {
   $('throw-mode').classList.add('hidden');
   $('bone-pouch').classList.remove('hidden');
+  hideAimLine();
   if (state === ST.THROWING) state = ST.POSSESSED;
 }
 
@@ -442,6 +515,7 @@ function launchBone(fromNdc, vel) {
   const bone = currentBone;
   if (!bone || flying) return;
   launchCount++;
+  hideAimLine();
   sfx && sfx.whoosh();
   /* 目标位置（NDC）：骨头中心投影，屏幕外则 clamp 到边缘 */
   const w = bone.mesh.getWorldPosition(new THREE.Vector3());
@@ -460,9 +534,10 @@ function launchBone(fromNdc, vel) {
   const clone = bone.mesh.clone();
   clone.traverse(o => { if (o.isMesh) o.material = o.material.clone ? o.material.clone() : o.material; });
   clone.position.copy(p0);
-  const spin = new THREE.Vector3(Math.random() * 6, Math.random() * 6, 0);
+  const spin = new THREE.Vector3(Math.random() * 9, Math.random() * 9, 0);
   scene.add(clone);
-  flying = { clone, t: 0, dur: 0.9, p0, p1, mid, land, bone, spin };
+  flying = { clone, t: 0, dur: 1.15, p0, p1, mid, land, bone, spin };
+  trailPts.length = 0;
   $('throw-ball').classList.remove('grabbed');
 }
 
@@ -476,7 +551,15 @@ function updateFlying(dt) {
   if (!flying) return;
   const f = flying;
   f.t += dt / f.dur;
+  /* 拖尾：记录最近位置 */
+  if (trailLine) {
+    trailPts.push(f.clone.position.clone());
+    if (trailPts.length > 14) trailPts.shift();
+    trailLine.geometry.setFromPoints(trailPts);
+    trailLine.visible = true;
+  }
   if (f.t >= 1) {
+    if (trailLine) trailLine.visible = false;
     /* 落地判定 */
     const cur = worldToNdc(f.clone.position);
     const tgtP = worldToNdc(f.bone.mesh.getWorldPosition(new THREE.Vector3()));
@@ -503,6 +586,20 @@ function updateFlying(dt) {
   f.clone.position.copy(bez3(f.p0, f.p1, f.mid, f.t));
   f.clone.rotation.x += dt * f.spin.x;
   f.clone.rotation.y += dt * f.spin.y;
+  f.clone.rotation.z += dt * f.spin.z;
+}
+
+/* 飞行拖尾线 */
+let trailLine = null, trailPts = [];
+function initTrail() {
+  if (trailLine) return;
+  trailLine = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+    new THREE.LineBasicMaterial({ color: 0x8fd8ff, transparent: true, opacity: 0.55, depthWrite: false })
+  );
+  trailLine.frustumCulled = false;
+  trailLine.visible = false;
+  scene.add(trailLine);
 }
 
 /* 屏幕浮动文字 */
@@ -585,7 +682,7 @@ function updateDirHint(cur) {
 }
 
 /* ─────────── 骨头查看层（3D 旋转确认）─────────── */
-let inspectRenderer = null, inspectScene = null, inspectCamera = null, inspectControls = null, inspectBone = null, inspLight = null;
+let inspectRenderer = null, inspectScene = null, inspectCamera = null, inspectControls = null, inspectBone = null, inspLight = null, inspectAutoRotate = false;
 function openInspect(bone) {
   state = ST.INSPECTING;
   currentBone = bone;
@@ -611,20 +708,32 @@ function openInspect(bone) {
   if (inspectControls) inspectControls.dispose();
   inspectControls = new OrbitControls(inspectCamera, inspectRenderer.domElement);
   inspectControls.enableDamping = true;
+  inspectControls.enablePan = false;
+  inspectControls.addEventListener('start', () => { inspectAutoRotate = false; });
   /* 克隆骨头（含子网格） */
   if (inspectBone) { inspectScene.remove(inspectBone); }
   const src = bone.mesh;
   const clone = src.clone();
-  clone.traverse(o => { if (o.isMesh) o.material = (o.material.clone ? o.material.clone() : o.material); });
-  /* 居中 + 缩放适配 */
-  const box = new THREE.Box3().setFromObject(clone);
+  clone.visible = true;  // ⚠️ 缺失骨网格被隐藏，clone 会继承 visible=false，必须恢复
+  clone.traverse(o => { if (o.isMesh) { o.visible = true; o.material = (o.material.clone ? o.material.clone() : o.material); } });
+  /* ⚠️ clone() 会继承原网格的 matrixWorld（rig 缩放/平移后的世界矩阵），必须重置 */
+  clone.position.set(0, 0, 0);
+  clone.quaternion.identity();
+  clone.scale.setScalar(1);
+  clone.updateMatrix();
+  /* 居中：Group 内先做局部居中（减几何中心），再整体缩放（避免 position 大数×小数不匹配） */
+  const boneWrap = new THREE.Group();
+  clone.geometry.computeBoundingBox();
+  const box = clone.geometry.boundingBox;
   const c = box.getCenter(new THREE.Vector3());
   const sz = box.getSize(new THREE.Vector3()).length();
   clone.position.sub(c);
-  const scale = 1.1 / Math.max(sz, 0.01);
-  clone.scale.setScalar(scale);
-  inspectScene.add(clone);
-  inspectBone = clone;
+  boneWrap.add(clone);
+  boneWrap.scale.setScalar(1.15 / Math.max(sz, 0.01));
+  inspectScene.add(boneWrap);
+  inspectBone = boneWrap;
+  /* 自动旋转展示：无交互时骨头缓慢自转，方便看清全貌 */
+  inspectAutoRotate = true;
   if (!inspRenderLoopRunning) inspRenderLoop();
 }
 let inspRenderLoopRunning = false;
@@ -633,6 +742,11 @@ function inspRenderLoop() {
   const loop = () => {
     if (!$('inspect-overlay').classList.contains('hidden')) {
       if (inspectControls) inspectControls.update();
+      /* 无交互时自动旋转展示 */
+      if (inspectAutoRotate && inspectBone) {
+        inspectBone.rotation.y += 0.012;
+        inspectBone.rotation.x = Math.sin(Date.now() / 4000) * 0.25;
+      }
       if (inspectRenderer && inspectScene) inspectRenderer.render(inspectScene, inspectCamera);
       requestAnimationFrame(loop);
     } else { inspRenderLoopRunning = false; }
@@ -730,6 +844,7 @@ function animate(ts) {
   });
   updateRig(dt);
   updateFlying(dt);
+  if (state === ST.THROWING) updateAimLine();
   tick(dt);
   renderer.render(scene, camera);
 }
@@ -753,6 +868,12 @@ async function startScan() {
   if (!DEMO) poseLoop();
   /* 演示模式：模拟一个人体 */
   if (DEMO) demoScanLoop();
+  /* 扫描超时提示：12s 内没检测到人 */
+  setTimeout(() => {
+    if (state === ST.SCANNING && !lastLandmarks && !DEMO) {
+      $('scan-msg').textContent = '😕 没检测到人体… 请调整位置/光线，或确认摄像头已授权';
+    }
+  }, 12000);
 }
 
 function lockTarget() {
@@ -822,22 +943,23 @@ ball.addEventListener('pointerdown', e => {
   ball.setPointerCapture(e.pointerId);
   dragStart = { x: e.clientX, y: e.clientY };
   ball.classList.add('grabbed');
+  updateAimLine();
 });
 ball.addEventListener('pointermove', e => {
   if (!dragStart) return;
   const dx = e.clientX - dragStart.x, dy = e.clientY - dragStart.y;
+  const vel = {
+    x: Math.max(-1, Math.min(1, (dx / innerWidth) * 3)),
+    y: Math.max(-1, Math.min(1, (dy / innerHeight) * 3)),
+  };
+  updateAimLine(vel);
   if (Math.hypot(dx, dy) > 26) {
-    /* 拖动即抛 */
-    const vel = {
-      x: Math.max(-1, Math.min(1, (dx / innerWidth) * 3)),
-      y: Math.max(-1, Math.min(1, (dy / innerHeight) * 3)),
-    };
     dragStart = null;
     ball.classList.remove('grabbed');
     launchBone({ x: 0, y: -0.72 }, vel);
   }
 });
-ball.addEventListener('pointerup', () => { dragStart = null; ball.classList.remove('grabbed'); });
+ball.addEventListener('pointerup', () => { dragStart = null; ball.classList.remove('grabbed'); updateAimLine(); });
 ball.addEventListener('pointercancel', () => { dragStart = null; ball.classList.remove('grabbed'); });
 
 /* 校准：旋转模型（每点 45°） */
@@ -864,7 +986,7 @@ window.addEventListener('resize', () => {
 });
 
 /* ─────────── 调试钩子（headless 测试用）─────────── */
-window.__dbg = { get scene() { return scene; }, get skeleton() { return skeleton; }, get rig() { return rig; }, get renderer() { return renderer; }, get camera() { return camera; } };
+window.__dbg = { get scene() { return scene; }, get skeleton() { return skeleton; }, get rig() { return rig; }, get renderer() { return renderer; }, get camera() { return camera; }, get inspectScene() { return inspectScene; }, get inspectBone() { return inspectBone; }, get inspectRenderer() { return inspectRenderer; }, get inspectCamera() { return inspectCamera; } };
 window.__boneGame = {
   get state() { return state; },
   get ST() { return ST; },
@@ -885,6 +1007,13 @@ window.__boneGame = {
 /* ─────────── 启动 ─────────── */
 (async function boot() {
   poseCanvas.width = innerWidth; poseCanvas.height = innerHeight;
+  /* 崩溃诊断：上次页面异常时显示原因 */
+  try {
+    const lastErr = JSON.parse(localStorage.getItem('bone_exorcism_err') || 'null');
+    if (lastErr && Date.now() - lastErr.t < 120000) {
+      errToast('⚠️ 检测到上次页面异常：' + lastErr.msg);
+    }
+  } catch (e) { /* ignore */ }
   try {
     await loadModel();
     animate(0);
