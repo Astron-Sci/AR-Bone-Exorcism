@@ -13,7 +13,7 @@ import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 
 /* ─────────── 配置 ─────────── */
 const GAME_TIME = 300;            // 一轮 300 秒
-const GAME_VERSION = 'v2.1';     // 版本号（封面显示，更新时改这里）
+const GAME_VERSION = 'v2.2';     // 版本号（封面显示，更新时改这里）
 const BONE_COUNT = 5;             // 每局缺失骨数量
 const HIT_RADIUS = 0.14;          // 抛掷命中判定半径（NDC）
 const PLANE_Z = -1.0;             // 游戏物体所在深度平面
@@ -317,6 +317,14 @@ function possess() {
   else toast('👻 恶灵附身！5 块骨头被黑雾吞噬，点击下方骨袋查看');
 }
 
+/* ⚠️ 目标位置必须用骨骼形状的几何中心，不能用网格原点（网格 position 在骨骼"根部"，长骨偏差很大） */
+function boneTargetPos(bone) {
+  const m = bone.mesh;
+  m.geometry.computeBoundingBox();
+  const c = m.geometry.boundingBox.getCenter(new THREE.Vector3());
+  return c.applyMatrix4(m.matrixWorld);
+}
+
 /* 黑雾：黑球 + 粒子 + 光环（位置用网格局部包围盒中心，随 skeleton 一起变换） */
 function createFog(mesh, color) {
   mesh.geometry.computeBoundingBox();
@@ -366,7 +374,7 @@ function exorcise(bone) {
   flashBone(bone.mesh, bone.color);
   sfx && sfx.hit();
   toast(`✅ ${bone.cn} 归位！`);
-  addFloatText(`✨ ${bone.cn}`, bone.mesh.getWorldPosition(new THREE.Vector3()));
+  addFloatText(`✨ ${bone.cn}`, boneTargetPos(bone));
   updateTargets();
   updatePouch();
   /* 清除抛掷状态 */
@@ -544,7 +552,7 @@ function moveDrag(ndc) {
 
 function updateDragGuide(ndc) {
   if (!dragGuide || !currentBone) return;
-  const w = currentBone.mesh.getWorldPosition(new THREE.Vector3());
+  const w = boneTargetPos(currentBone);
   const tgt = worldToNdc(w);
   const dist = Math.hypot(ndc.x - tgt.x, ndc.y - tgt.y);
   const p0 = ndcToWorld(ndc.x, ndc.y);
@@ -560,7 +568,7 @@ function endDrag(ndc) {
   if (!dragActive) return;
   dragActive = false;
   const bone = currentBone;
-  const w = bone.mesh.getWorldPosition(new THREE.Vector3());
+  const w = boneTargetPos(bone);
   const tgt = worldToNdc(w);
   const dist = Math.hypot(ndc.x - tgt.x, ndc.y - tgt.y);
   const vis = Math.hypot(tgt.x, tgt.y) < 1.0;
@@ -630,7 +638,7 @@ function updateTargets() {
   /* 当前目标：离屏幕中心最近的未完成骨 */
   let cur = null, bestD = 1e9;
   undone.forEach(b => {
-    const w = b.mesh.getWorldPosition(new THREE.Vector3());
+    const w = boneTargetPos(b);
     const n = worldToNdc(w);
     const d = Math.hypot(n.x, n.y);
     if (d < bestD) { bestD = d; cur = b; }
@@ -646,7 +654,7 @@ function updateTargets() {
 function updateDirHint(cur) {
   const hint = $('dir-hint');
   if (!cur) { hint.classList.add('hidden'); return; }
-  const w = cur.mesh.getWorldPosition(new THREE.Vector3());
+  const w = boneTargetPos(cur);
   const n = worldToNdc(w);
   hint.classList.remove('hidden');
   const inView = Math.abs(n.x) < 0.9 && Math.abs(n.y) < 0.85;
@@ -988,11 +996,19 @@ window.__boneGame = {
   /* 拖放到目标骨头位置（测试/演示辅助） */
   dragToTarget() {
     if (state !== ST.THROWING || !currentBone) return false;
-    const w = currentBone.mesh.getWorldPosition(new THREE.Vector3());
+    const w = boneTargetPos(currentBone);
     const n = worldToNdc(w);
     return this.dragTo(n.x, n.y);
   },
   get dragging() { return dragActive; },
+  /* 探针：对比当前目标"网格原点"与"几何中心"的判定点差异（NDC） */
+  probeTarget() {
+    if (!currentBone) return null;
+    const w0 = currentBone.mesh.getWorldPosition(new THREE.Vector3());
+    const w1 = boneTargetPos(currentBone);
+    const n0 = worldToNdc(w0), n1 = worldToNdc(w1);
+    return { bone: currentBone.cn, origin: n0, center: n1, diff: +Math.hypot(n0.x - n1.x, n0.y - n1.y).toFixed(3) };
+  },
 };
 
 /* ─────────── 启动 ─────────── */
