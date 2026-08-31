@@ -357,6 +357,7 @@ function createFog(mesh, color) {
 function exorcise(bone) {
   bone.done = true;
   bone.mesh.visible = true;
+  hideGhost();
   const fog = bone.fog;
   const wp = fog.getWorldPosition(new THREE.Vector3());
   skeleton.remove(fog);
@@ -441,8 +442,26 @@ function flashBone(mesh, color) {
 }
 
 /* ─────────── 拖放系统（按住骨头拖动到目标位置，松手归位）─────────── */
-let targetMarker = null, dragGuide = null, dragBone = null, dragActive = false;
+let targetMarker = null, dragGuide = null, dragBone = null, dragActive = false, ghostBone = null;
 
+/* 目标虚影：在缺失骨头原位置显示半透明轮廓（拼图式引导） */
+function showGhost(bone) {
+  hideGhost();
+  const src = bone.mesh;
+  const clone = src.clone();
+  clone.visible = true;
+  clone.traverse(o => {
+    if (o.isMesh) {
+      o.visible = true;
+      o.material = new THREE.MeshBasicMaterial({ color: 0xdbe6ff, transparent: true, opacity: 0.28, depthWrite: false });
+    }
+  });
+  skeleton.add(clone);
+  ghostBone = clone;
+}
+function hideGhost() {
+  if (ghostBone) { skeleton.remove(ghostBone); ghostBone = null; }
+}
 function initDrag() {
   if (targetMarker) return;
   /* 目标标记：粉色脉冲圈（提示拖到哪） */
@@ -493,6 +512,7 @@ function startThrow(bone) {
   $('throw-ball-name').textContent = bone.cn;
   $('throw-ball-icon').textContent = '🦴';
   initDrag();
+  showGhost(bone);
   updateTargets();
 }
 
@@ -500,6 +520,7 @@ function exitThrowMode() {
   $('throw-mode').classList.add('hidden');
   $('bone-pouch').classList.remove('hidden');
   cancelDrag();
+  hideGhost();
   if (state === ST.THROWING) state = ST.POSSESSED;
 }
 
