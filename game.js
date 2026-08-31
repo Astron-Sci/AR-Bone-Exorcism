@@ -453,29 +453,32 @@ function initAim() {
   aimLine = new Line2(
     new LineGeometry(),
     new LineMaterial({
-      color: 0x00e5ff, linewidth: 4, transparent: true, opacity: 0.95,
-      dashed: true, dashSize: 0.06, gapSize: 0.04,
+      color: 0x00e5ff, linewidth: 8, transparent: true, opacity: 1.0,
+      dashed: true, dashSize: 0.07, gapSize: 0.045,
       resolution: new THREE.Vector2(innerWidth, innerHeight),
-      depthWrite: false,
+      depthTest: false,   // 不被骨骼/黑雾遮挡，始终可见
     })
   );
   aimLine.frustumCulled = false;
+  aimLine.renderOrder = 999;
   aimLine.visible = false;
   scene.add(aimLine);
   aimRing = new THREE.Mesh(
-    new THREE.RingGeometry(0.05, 0.068, 28),
-    new THREE.MeshBasicMaterial({ color: 0xffe14d, transparent: true, opacity: 0.95, side: THREE.DoubleSide, depthWrite: false })
+    new THREE.RingGeometry(0.075, 0.105, 32),
+    new THREE.MeshBasicMaterial({ color: 0xffe14d, transparent: true, opacity: 1.0, side: THREE.DoubleSide, depthWrite: false, depthTest: false })
   );
   aimRing.rotation.x = -Math.PI / 2;
   aimRing.frustumCulled = false;
+  aimRing.renderOrder = 999;
   aimRing.visible = false;
   scene.add(aimRing);
   targetMarker = new THREE.Mesh(
-    new THREE.RingGeometry(0.055, 0.075, 28),
-    new THREE.MeshBasicMaterial({ color: 0xff5d8f, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false })
+    new THREE.RingGeometry(0.08, 0.11, 32),
+    new THREE.MeshBasicMaterial({ color: 0xff5d8f, transparent: true, opacity: 0.95, side: THREE.DoubleSide, depthWrite: false, depthTest: false })
   );
   targetMarker.rotation.x = -Math.PI / 2;
   targetMarker.frustumCulled = false;
+  targetMarker.renderOrder = 999;
   scene.add(targetMarker);
 }
 /* 预测落点（NDC） */
@@ -489,29 +492,19 @@ function aimLandNdc(vel) {
 function updateAimLine(vel) {
   if (state !== ST.THROWING || flying || !aimLine) { hideAimLine(); return; }
   const dragging = !!(vel && (Math.abs(vel.x) > 0.01 || Math.abs(vel.y) > 0.01));
-  if (!dragging) {
-    /* 未拖动：从骨球指向目标骨头的直线（提示甩动方向） */
+  /* 落点：拖动=甩动预测；未拖动=目标位置（理想轨迹，始终可见抛物线） */
+  let land;
+  if (dragging) {
+    land = aimLandNdc(vel);
+  } else {
     if (!currentBone) { hideAimLine(); return; }
     const w = currentBone.mesh.getWorldPosition(new THREE.Vector3());
     const n = worldToNdc(w);
-    const p0 = ndcToWorld(THROW_ORIGIN.x, THROW_ORIGIN.y);
-    const p1 = ndcToWorld(Math.max(-0.95, Math.min(0.95, n.x)), Math.max(-0.95, Math.min(0.95, n.y)));
-    const arr = [];
-    for (let i = 0; i <= 20; i++) {
-      const t = i / 20;
-      arr.push(p0.x + (p1.x - p0.x) * t, p0.y + (p1.y - p0.y) * t, PLANE_Z);
-    }
-    aimLine.geometry.setPositions(arr);
-    aimLine.computeLineDistances();
-    aimLine.visible = true;
-    aimRing.visible = false;
-    return;
+    land = { x: Math.max(-0.95, Math.min(0.95, n.x)), y: Math.max(-0.95, Math.min(0.95, n.y)) };
   }
-  /* 拖动中：抛物线预测轨迹 + 落点金圈 */
-  const land = aimLandNdc(vel);
   const p0 = ndcToWorld(THROW_ORIGIN.x, THROW_ORIGIN.y);
   const p1 = ndcToWorld(land.x, land.y);
-  const mid = new THREE.Vector3((p0.x + p1.x) / 2, Math.max(p0.y, p1.y) + 0.55, PLANE_Z);
+  const mid = new THREE.Vector3((p0.x + p1.x) / 2, Math.max(p0.y, p1.y) + 0.6, PLANE_Z);
   const arr = [];
   for (let i = 0; i <= 26; i++) {
     const p = bez3(p0, p1, mid, i / 26);
