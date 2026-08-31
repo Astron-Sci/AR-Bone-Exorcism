@@ -1,0 +1,10 @@
+{
+  "name": "ar-bone-exorcism",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "骨灵驱魔 AR - 宝可梦GO式AR骨学闯关游戏",
+  "dependencies": {
+    "pngjs": "^7.0.0"
+  }
+}

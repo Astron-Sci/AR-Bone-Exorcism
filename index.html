@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>骨灵驱魔 AR · 骨骼驱魔游戏</title>
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="app">
+  <!-- 摄像头画面 -->
+  <video id="video" playsinline autoplay muted></video>
+  <!-- Three.js 叠加层 -->
+  <div id="three-container"></div>
+
+  <!-- 扫描轮廓画布 -->
+  <canvas id="pose-canvas"></canvas>
+
+  <!-- ═══ 开始封面 ═══ -->
+  <div id="start-overlay" class="overlay">
+    <div class="panel">
+      <div class="logo">🦴</div>
+      <h1>骨灵驱魔</h1>
+      <div class="subtitle">AR 骨骼驱魔 · 骨学闯关</div>
+      <div class="howto">
+        <div class="ht-item">📡 镜头对准被附身者，<b>扫描</b>锁定目标</div>
+        <div class="ht-item">🦴 骷髅上身，<b>5 块骨头被黑雾吞噬</b></div>
+        <div class="ht-item">👻 恶灵不断侵蚀肉体 — <b>300 秒</b>内驱魔</div>
+        <div class="ht-item">🏀 查看手里的骨，<b>像扔精灵球一样</b>甩向对应位置</div>
+        <div class="ht-item">✨ 黑雾全消 = 驱魔成功，记录时长</div>
+      </div>
+      <button id="btn-start" class="btn-primary">▶ 开始驱魔</button>
+      <button id="btn-demo" class="btn-ghost">🎮 无摄像头？试试演示模式</button>
+      <div class="tip">📱 请使用后置摄像头 · 确保光线充足<br>⚠️ 画面中请只保留<b>一位</b>被驱魔对象（多人锁定为 v2 计划）</div>
+    </div>
+  </div>
+
+  <!-- ═══ 扫描提示层 ═══ -->
+  <div id="scan-overlay" class="overlay hidden">
+    <div class="scan-frame">
+      <div class="scan-corner tl"></div><div class="scan-corner tr"></div>
+      <div class="scan-corner bl"></div><div class="scan-corner br"></div>
+      <div id="scan-msg" class="scan-msg">正在扫描人体轮廓…</div>
+    </div>
+  </div>
+
+  <!-- ═══ 游戏 HUD ═══ -->
+  <div id="hud" class="hidden">
+    <!-- 顶部：HP + 倒计时 -->
+    <div id="hud-top">
+      <div class="hp-wrap">
+        <div class="hp-label">被附身者 <span id="hp-pct">100%</span></div>
+        <div class="hp-bar"><div id="hp-fill"></div></div>
+      </div>
+      <div id="timer">05:00</div>
+    </div>
+
+    <!-- 方向指示 -->
+    <div id="dir-hint" class="hidden">
+      <div id="dir-arrow">▲</div>
+      <div id="dir-text">黑雾在 …</div>
+    </div>
+
+    <!-- 目标面板 -->
+    <div id="target-panel">
+      <div class="tp-title">🦴 恶灵缺失的骨头</div>
+      <div id="target-list"></div>
+    </div>
+  </div>
+
+  <!-- ═══ 骨袋（底部） ═══ -->
+  <div id="bone-pouch" class="hidden">
+    <div id="pouch-label">点击骨头查看形态，确认后甩出去</div>
+    <div id="pouch-slots"></div>
+  </div>
+
+  <!-- ═══ 抛掷模式 ═══ -->
+  <div id="throw-mode" class="hidden">
+    <div id="throw-ball">
+      <div id="throw-ball-icon">🦴</div>
+      <div id="throw-ball-name">额骨</div>
+    </div>
+    <div id="throw-tip">按住骨球，向目标方向甩出！</div>
+    <div id="throw-cancel">↩ 换一块骨</div>
+  </div>
+
+  <!-- ═══ 骨头查看层 ═══ -->
+  <div id="inspect-overlay" class="overlay hidden">
+    <div class="inspect-box">
+      <div class="insp-head">
+        <div>
+          <div id="insp-cn" class="insp-cn">额骨</div>
+          <div id="insp-en" class="insp-en">frontal_bone</div>
+        </div>
+        <button id="insp-close" class="mini-btn">×</button>
+      </div>
+      <div id="insp-canvas"></div>
+      <div id="insp-hint" class="insp-hint">🖐 拖动旋转 / 双指缩放，记住它的形态</div>
+      <div id="insp-desc" class="insp-desc"></div>
+      <button id="insp-confirm" class="btn-primary">🏀 拿好它，准备抛掷</button>
+    </div>
+  </div>
+
+  <!-- ═══ 结果弹窗 ═══ -->
+  <div id="result-overlay" class="overlay hidden">
+    <div class="panel result-panel">
+      <div id="result-emoji" class="result-emoji">🎉</div>
+      <div id="result-title" class="result-title">驱魔成功！</div>
+      <div id="result-detail" class="result-detail">用时 02:15</div>
+      <div id="result-best" class="result-best"></div>
+      <div id="result-history" class="result-history"></div>
+      <button id="btn-again" class="btn-primary">🔄 再驱一次</button>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="hidden"></div>
+  <div id="err-toast" class="hidden"></div>
+
+  <!-- 静音按钮 -->
+  <button id="btn-mute" class="fab hidden">🔊</button>
+</div>
+
+<script src="lib/mediapipe_pose.js"></script>
+<script type="module" src="game.js"></script>
+</body>
+</html>
