@@ -13,6 +13,7 @@ import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 
 /* ─────────── 配置 ─────────── */
 const GAME_TIME = 300;            // 一轮 300 秒
+const GAME_VERSION = 'v1.3';     // 版本号（封面显示，更新时改这里）
 const BONE_COUNT = 5;             // 每局缺失骨数量
 const HIT_RADIUS = 0.14;          // 抛掷命中判定半径（NDC）
 const PLANE_Z = -1.0;             // 游戏物体所在深度平面
@@ -1063,6 +1064,9 @@ window.__boneGame = {
 /* ─────────── 启动 ─────────── */
 (async function boot() {
   poseCanvas.width = innerWidth; poseCanvas.height = innerHeight;
+  /* 封面版本号 */
+  const verEl = $('game-version');
+  if (verEl) verEl.textContent = GAME_VERSION;
   /* 崩溃诊断：上次页面异常时显示原因 */
   try {
     const lastErr = JSON.parse(localStorage.getItem('bone_exorcism_err') || 'null');
