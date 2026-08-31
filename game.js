@@ -13,7 +13,7 @@ import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 
 /* ─────────── 配置 ─────────── */
 const GAME_TIME = 300;            // 一轮 300 秒
-const GAME_VERSION = 'v1.3';     // 版本号（封面显示，更新时改这里）
+const GAME_VERSION = 'v2.0';     // 版本号（封面显示，更新时改这里）
 const BONE_COUNT = 5;             // 每局缺失骨数量
 const HIT_RADIUS = 0.14;          // 抛掷命中判定半径（NDC）
 const PLANE_Z = -1.0;             // 游戏物体所在深度平面
@@ -77,8 +77,7 @@ let currentBone = null;    // 正在抛掷的骨
 let timeLeft = GAME_TIME;
 let gameRunning = false;
 let lastTs = 0;
-let flying = null;         // 飞行中的骨
-let launchCount = 0;       // 调试：抛掷次数
+let launchCount = 0;       // 调试：拖放次数
 let lastThrowResult = null; // 调试：最近一次结果
 let rigSmooth = { x: 0, y: 0, footY: -0.5, s: 1 };
 let modelRotY = parseFloat(localStorage.getItem('bone_exorcism_roty') || 0);
@@ -441,37 +440,12 @@ function flashBone(mesh, color) {
   a();
 }
 
-/* ─────────── 抛掷系统 ─────────── */
-/* 抛射物理：落点 = 骨球位置 + 甩动速度×THROW_POWER（甩哪打哪，非自动瞄准） */
-const THROW_POWER = 0.5;
-const THROW_ORIGIN = { x: 0, y: -0.72 };   // 骨球位置（NDC）
+/* ─────────── 拖放系统（按住骨头拖动到目标位置，松手归位）─────────── */
+let targetMarker = null, dragGuide = null, dragBone = null, dragActive = false;
 
-/* 瞄准线：Line2（支持线宽）抛物线预测 + 落点标记环 + 目标标记环 */
-let aimLine = null, aimRing = null, targetMarker = null, aimLinePts = [];
-function initAim() {
-  if (aimLine) return;
-  aimLine = new Line2(
-    new LineGeometry(),
-    new LineMaterial({
-      color: 0x00e5ff, linewidth: 8, transparent: true, opacity: 1.0,
-      dashed: true, dashSize: 0.07, gapSize: 0.045,
-      resolution: new THREE.Vector2(innerWidth, innerHeight),
-      depthTest: false,   // 不被骨骼/黑雾遮挡，始终可见
-    })
-  );
-  aimLine.frustumCulled = false;
-  aimLine.renderOrder = 999;
-  aimLine.visible = false;
-  scene.add(aimLine);
-  aimRing = new THREE.Mesh(
-    new THREE.RingGeometry(0.075, 0.105, 32),
-    new THREE.MeshBasicMaterial({ color: 0xffe14d, transparent: true, opacity: 1.0, side: THREE.DoubleSide, depthWrite: false, depthTest: false })
-  );
-  aimRing.rotation.x = -Math.PI / 2;
-  aimRing.frustumCulled = false;
-  aimRing.renderOrder = 999;
-  aimRing.visible = false;
-  scene.add(aimRing);
+function initDrag() {
+  if (targetMarker) return;
+  /* 目标标记：粉色脉冲圈（提示拖到哪） */
   targetMarker = new THREE.Mesh(
     new THREE.RingGeometry(0.08, 0.11, 32),
     new THREE.MeshBasicMaterial({ color: 0xff5d8f, transparent: true, opacity: 0.95, side: THREE.DoubleSide, depthWrite: false, depthTest: false })
@@ -480,44 +454,25 @@ function initAim() {
   targetMarker.frustumCulled = false;
   targetMarker.renderOrder = 999;
   scene.add(targetMarker);
+  /* 引导线：拖动时从手指位置指向目标，靠近变绿 */
+  dragGuide = new Line2(
+    new LineGeometry(),
+    new LineMaterial({
+      color: 0x00e5ff, linewidth: 6, transparent: true, opacity: 1.0,
+      dashed: true, dashSize: 0.06, gapSize: 0.04,
+      resolution: new THREE.Vector2(innerWidth, innerHeight),
+      depthTest: false,
+    })
+  );
+  dragGuide.frustumCulled = false;
+  dragGuide.renderOrder = 999;
+  dragGuide.visible = false;
+  scene.add(dragGuide);
 }
-/* 预测落点（NDC） */
-function aimLandNdc(vel) {
-  const v = vel || { x: 0, y: 0 };
-  return {
-    x: Math.max(-0.98, Math.min(0.98, THROW_ORIGIN.x + v.x * THROW_POWER)),
-    y: Math.max(-0.98, Math.min(0.98, THROW_ORIGIN.y + v.y * THROW_POWER)),
-  };
-}
-function updateAimLine(vel) {
-  if (state !== ST.THROWING || flying || !aimLine) { hideAimLine(); return; }
-  const dragging = !!(vel && (Math.abs(vel.x) > 0.01 || Math.abs(vel.y) > 0.01));
-  /* 落点：拖动=甩动预测；未拖动=目标位置（理想轨迹，始终可见抛物线） */
-  let land;
-  if (dragging) {
-    land = aimLandNdc(vel);
-  } else {
-    if (!currentBone) { hideAimLine(); return; }
-    const w = currentBone.mesh.getWorldPosition(new THREE.Vector3());
-    const n = worldToNdc(w);
-    land = { x: Math.max(-0.95, Math.min(0.95, n.x)), y: Math.max(-0.95, Math.min(0.95, n.y)) };
-  }
-  const p0 = ndcToWorld(THROW_ORIGIN.x, THROW_ORIGIN.y);
-  const p1 = ndcToWorld(land.x, land.y);
-  const mid = new THREE.Vector3((p0.x + p1.x) / 2, Math.max(p0.y, p1.y) + 0.6, PLANE_Z);
-  const arr = [];
-  for (let i = 0; i <= 26; i++) {
-    const p = bez3(p0, p1, mid, i / 26);
-    arr.push(p.x, p.y, p.z);
-  }
-  aimLine.geometry.setPositions(arr);
-  aimLine.computeLineDistances();
-  aimLine.visible = true;
-  aimRing.position.copy(p1);
-  aimRing.visible = true;
-}
+
 function updateTargetMarker() {
-  if (!targetMarker || state !== ST.THROWING || !currentBone) { if (targetMarker) targetMarker.visible = false; return; }
+  if (!targetMarker) return;
+  if (state !== ST.THROWING || !currentBone) { targetMarker.visible = false; return; }
   const w = currentBone.mesh.getWorldPosition(new THREE.Vector3());
   const n = worldToNdc(w);
   if (Math.abs(n.x) < 0.92 && Math.abs(n.y) < 0.85) {
@@ -529,11 +484,6 @@ function updateTargetMarker() {
     targetMarker.visible = false;   // 目标出屏时由边缘箭头提示
   }
 }
-function hideAimLine() {
-  if (aimLine) aimLine.visible = false;
-  if (aimRing) aimRing.visible = false;
-  if (targetMarker) targetMarker.visible = false;
-}
 
 function startThrow(bone) {
   currentBone = bone;
@@ -542,101 +492,93 @@ function startThrow(bone) {
   $('throw-mode').classList.remove('hidden');
   $('throw-ball-name').textContent = bone.cn;
   $('throw-ball-icon').textContent = '🦴';
-  initAim();
-  initTrail();
+  initDrag();
   updateTargets();
-  updateAimLine();
 }
 
 function exitThrowMode() {
   $('throw-mode').classList.add('hidden');
   $('bone-pouch').classList.remove('hidden');
-  hideAimLine();
+  cancelDrag();
   if (state === ST.THROWING) state = ST.POSSESSED;
 }
 
-/* 抛出：从骨球按甩动方向飞出（甩哪打哪） */
-function launchBone(fromNdc, vel) {
-  const bone = currentBone;
-  if (!bone || flying) return;
-  launchCount++;
-  hideAimLine();
+/* 开始拖动：半透明骨头跟随手指 */
+function startDrag(ndc) {
+  if (state !== ST.THROWING || !currentBone || dragActive) return;
+  dragActive = true;
   sfx && sfx.whoosh();
-  /* 落点 = 骨球位置 + 甩动速度×力度（不自动瞄准目标） */
-  const land = aimLandNdc(vel);
-  const p0 = ndcToWorld(fromNdc.x, fromNdc.y);
-  const p1 = ndcToWorld(land.x, land.y);
-  const mid = new THREE.Vector3((p0.x + p1.x) / 2, Math.max(p0.y, p1.y) + 0.6, PLANE_Z);
-  /* 克隆骨头网格作为飞行物 */
-  const clone = bone.mesh.clone();
-  clone.traverse(o => { if (o.isMesh) o.material = o.material.clone ? o.material.clone() : o.material; });
-  clone.position.copy(p0);
-  const spin = new THREE.Vector3(Math.random() * 9, Math.random() * 9, 0);
-  scene.add(clone);
-  flying = { clone, t: 0, dur: 1.15, p0, p1, mid, land, bone, spin };
-  trailPts.length = 0;
-  $('throw-ball').classList.remove('grabbed');
-}
-
-function bez3(p0, p1, mid, t) {
-  const a = new THREE.Vector3().lerpVectors(p0, mid, t);
-  const b = new THREE.Vector3().lerpVectors(mid, p1, t);
-  return a.lerp(b, t);
-}
-
-function updateFlying(dt) {
-  if (!flying) return;
-  const f = flying;
-  f.t += dt / f.dur;
-  /* 拖尾：记录最近位置 */
-  if (trailLine) {
-    trailPts.push(f.clone.position.clone());
-    if (trailPts.length > 14) trailPts.shift();
-    trailLine.geometry.setFromPoints(trailPts);
-    trailLine.visible = true;
-  }
-  if (f.t >= 1) {
-    if (trailLine) trailLine.visible = false;
-    /* 落地判定 */
-    const cur = worldToNdc(f.clone.position);
-    const tgtP = worldToNdc(f.bone.mesh.getWorldPosition(new THREE.Vector3()));
-    const dist = Math.hypot(cur.x - tgtP.x, cur.y - tgtP.y);
-    const vis = Math.hypot(tgtP.x, tgtP.y) < 1.0;
-    scene.remove(f.clone);
-    flying = null;
-    if (vis && dist < HIT_RADIUS) {
-      lastThrowResult = { hit: true, dist, bone: f.bone.cn };
-      exorcise(f.bone);
-    } else {
-      lastThrowResult = { hit: false, dist, vis, bone: f.bone.cn, cur, tgtP };
-      sfx && sfx.buzz();
-      const diff = Math.round(dist * 100);
-      addFloatText(`偏了 ${diff}%`, f.clone.position, true);
-      toast(`💨 没扔准（差 ${diff}%），再试一次`);
-      /* 骨回到骨袋 */
-      currentBone = null;
-      exitThrowMode();
-      if (DEMO) startThrow(f.bone); else selectPouchBone(f.bone.en);
+  const src = currentBone.mesh;
+  const clone = src.clone();
+  clone.visible = true;
+  clone.traverse(o => {
+    if (o.isMesh) {
+      o.visible = true;
+      o.material = new THREE.MeshBasicMaterial({ color: 0x7fd8ff, transparent: true, opacity: 0.75, depthWrite: false, depthTest: false });
     }
-    return;
-  }
-  f.clone.position.copy(bez3(f.p0, f.p1, f.mid, f.t));
-  f.clone.rotation.x += dt * f.spin.x;
-  f.clone.rotation.y += dt * f.spin.y;
-  f.clone.rotation.z += dt * f.spin.z;
+  });
+  /* 居中 + 缩放到手指可操控大小 */
+  const boneWrap = new THREE.Group();
+  clone.geometry.computeBoundingBox();
+  const box = clone.geometry.boundingBox;
+  const c = box.getCenter(new THREE.Vector3());
+  clone.position.sub(c);
+  boneWrap.add(clone);
+  boneWrap.scale.setScalar(0.32 / Math.max(box.getSize(new THREE.Vector3()).length(), 0.01));
+  scene.add(boneWrap);
+  dragBone = boneWrap;
+  moveDrag(ndc);
 }
 
-/* 飞行拖尾线 */
-let trailLine = null, trailPts = [];
-function initTrail() {
-  if (trailLine) return;
-  trailLine = new THREE.Line(
-    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
-    new THREE.LineBasicMaterial({ color: 0x8fd8ff, transparent: true, opacity: 0.55, depthWrite: false })
-  );
-  trailLine.frustumCulled = false;
-  trailLine.visible = false;
-  scene.add(trailLine);
+function moveDrag(ndc) {
+  if (!dragActive || !dragBone) return;
+  dragBone.position.copy(ndcToWorld(ndc.x, ndc.y));
+  updateDragGuide(ndc);
+}
+
+function updateDragGuide(ndc) {
+  if (!dragGuide || !currentBone) return;
+  const w = currentBone.mesh.getWorldPosition(new THREE.Vector3());
+  const tgt = worldToNdc(w);
+  const dist = Math.hypot(ndc.x - tgt.x, ndc.y - tgt.y);
+  const p0 = ndcToWorld(ndc.x, ndc.y);
+  const p1 = ndcToWorld(Math.max(-0.95, Math.min(0.95, tgt.x)), Math.max(-0.95, Math.min(0.95, tgt.y)));
+  dragGuide.geometry.setPositions([p0.x, p0.y, p0.z, p1.x, p1.y, p1.z]);
+  dragGuide.computeLineDistances();
+  dragGuide.visible = true;
+  dragGuide.material.color.set(dist < HIT_RADIUS * 1.6 ? 0x4dffa6 : 0x00e5ff);
+}
+
+/* 松手判定：位置在目标骨头附近 → 归位 */
+function endDrag(ndc) {
+  if (!dragActive) return;
+  dragActive = false;
+  const bone = currentBone;
+  const w = bone.mesh.getWorldPosition(new THREE.Vector3());
+  const tgt = worldToNdc(w);
+  const dist = Math.hypot(ndc.x - tgt.x, ndc.y - tgt.y);
+  const vis = Math.hypot(tgt.x, tgt.y) < 1.0;
+  scene.remove(dragBone); dragBone = null;
+  if (dragGuide) dragGuide.visible = false;
+  if (vis && dist < HIT_RADIUS) {
+    lastThrowResult = { hit: true, dist, bone: bone.cn };
+    exorcise(bone);
+  } else {
+    lastThrowResult = { hit: false, dist, vis, bone: bone.cn };
+    sfx && sfx.buzz();
+    const diff = Math.round(dist * 100);
+    addFloatText(`偏了 ${diff}%`, ndcToWorld(ndc.x, ndc.y), true);
+    toast(`💨 没对准（差 ${diff}%），骨头回到骨袋`);
+    currentBone = null;
+    exitThrowMode();
+    if (DEMO) startThrow(bone); else selectPouchBone(bone.en);
+  }
+}
+
+function cancelDrag() {
+  dragActive = false;
+  if (dragBone) { scene.remove(dragBone); dragBone = null; }
+  if (dragGuide) dragGuide.visible = false;
 }
 
 /* 屏幕浮动文字 */
@@ -880,8 +822,7 @@ function animate(ts) {
     u.pts.material.opacity = 0.7 + Math.sin(u.t * 3) * 0.2;
   });
   updateRig(dt);
-  updateFlying(dt);
-  if (state === ST.THROWING) { updateAimLine(); updateTargetMarker(); }
+  if (state === ST.THROWING) updateTargetMarker();
   tick(dt);
   renderer.render(scene, camera);
 }
@@ -973,31 +914,23 @@ $('throw-cancel').onclick = () => {
 
 /* 抛掷交互：按住骨球拖动甩出 */
 const ball = $('throw-ball');
-let dragStart = null;
+const ptToNdc = e => ({ x: (e.clientX / innerWidth) * 2 - 1, y: -((e.clientY / innerHeight) * 2 - 1) });
 ball.addEventListener('pointerdown', e => {
-  if (state !== ST.THROWING || flying) return;
+  if (state !== ST.THROWING || dragActive) return;
   sfx && sfx.ensure && sfx.ensure();
   ball.setPointerCapture(e.pointerId);
-  dragStart = { x: e.clientX, y: e.clientY };
+  startDrag(ptToNdc(e));
   ball.classList.add('grabbed');
-  updateAimLine();
 });
 ball.addEventListener('pointermove', e => {
-  if (!dragStart) return;
-  const dx = e.clientX - dragStart.x, dy = e.clientY - dragStart.y;
-  const vel = {
-    x: Math.max(-1, Math.min(1, (dx / innerWidth) * 3)),
-    y: Math.max(-1, Math.min(1, (dy / innerHeight) * 3)),
-  };
-  updateAimLine(vel);
-  if (Math.hypot(dx, dy) > 26) {
-    dragStart = null;
-    ball.classList.remove('grabbed');
-    launchBone({ x: 0, y: -0.72 }, vel);
-  }
+  if (!dragActive) return;
+  moveDrag(ptToNdc(e));
 });
-ball.addEventListener('pointerup', () => { dragStart = null; ball.classList.remove('grabbed'); updateAimLine(); });
-ball.addEventListener('pointercancel', () => { dragStart = null; ball.classList.remove('grabbed'); });
+ball.addEventListener('pointerup', e => {
+  ball.classList.remove('grabbed');
+  if (dragActive) endDrag(ptToNdc(e));
+});
+ball.addEventListener('pointercancel', () => { ball.classList.remove('grabbed'); cancelDrag(); });
 
 /* 校准：旋转模型（每点 45°） */
 window.addEventListener('keydown', e => {
@@ -1020,7 +953,7 @@ window.addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
   poseCanvas.width = innerWidth; poseCanvas.height = innerHeight;
-  if (aimLine && aimLine.material) aimLine.material.resolution.set(innerWidth, innerHeight);
+  if (dragGuide && dragGuide.material) dragGuide.material.resolution.set(innerWidth, innerHeight);
 });
 
 /* ─────────── 调试钩子（headless 测试用）─────────── */
@@ -1032,26 +965,28 @@ window.__boneGame = {
   get timeLeft() { return timeLeft; },
   get currentBone() { return currentBone ? currentBone.cn : null; },
   get modelLoaded() { return !!skeleton; },
-  get flying() { return flying ? { t: flying.t, land: flying.land } : null; },
   get launchCount() { return launchCount; },
   get lastResult() { return lastThrowResult; },
   clickPouch(en) { selectPouchBone(en); },
   confirmInspect() { $('insp-confirm').click(); },
   closeInspect() { closeInspect(); },
-  throwNow(vel) { if (state === ST.THROWING) launchBone({ x: THROW_ORIGIN.x, y: THROW_ORIGIN.y }, vel || { x: 0, y: 0.1 }); },
-  /* 模拟玩家瞄准目标甩出（测试/演示辅助：精确计算到目标的甩动速度） */
-  throwAt() {
+  possessNow() { if (state === ST.SCANNING && lastLandmarks) lockTarget(); },
+  /* 拖放测试辅助：模拟按住骨球拖到 (nx,ny)（NDC）松手 */
+  dragTo(nx, ny) {
+    if (state !== ST.THROWING || !currentBone) return false;
+    startDrag({ x: 0, y: -0.72 });
+    moveDrag({ x: nx, y: ny });
+    endDrag({ x: nx, y: ny });
+    return true;
+  },
+  /* 拖放到目标骨头位置（测试/演示辅助） */
+  dragToTarget() {
     if (state !== ST.THROWING || !currentBone) return false;
     const w = currentBone.mesh.getWorldPosition(new THREE.Vector3());
     const n = worldToNdc(w);
-    const vel = {
-      x: Math.max(-1, Math.min(1, (n.x - THROW_ORIGIN.x) / THROW_POWER)),
-      y: Math.max(-1, Math.min(1, (n.y - THROW_ORIGIN.y) / THROW_POWER)),
-    };
-    launchBone({ x: THROW_ORIGIN.x, y: THROW_ORIGIN.y }, vel);
-    return true;
+    return this.dragTo(n.x, n.y);
   },
-  possessNow() { if (state === ST.SCANNING && lastLandmarks) lockTarget(); },
+  get dragging() { return dragActive; },
 };
 
 /* ─────────── 启动 ─────────── */
