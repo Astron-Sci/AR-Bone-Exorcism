@@ -13,7 +13,7 @@ import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 
 /* ─────────── 配置 ─────────── */
 const GAME_TIME = 300;            // 一轮 300 秒
-const GAME_VERSION = 'v2.0';     // 版本号（封面显示，更新时改这里）
+const GAME_VERSION = 'v2.1';     // 版本号（封面显示，更新时改这里）
 const BONE_COUNT = 5;             // 每局缺失骨数量
 const HIT_RADIUS = 0.14;          // 抛掷命中判定半径（NDC）
 const PLANE_Z = -1.0;             // 游戏物体所在深度平面
@@ -442,9 +442,9 @@ function flashBone(mesh, color) {
 }
 
 /* ─────────── 拖放系统（按住骨头拖动到目标位置，松手归位）─────────── */
-let targetMarker = null, dragGuide = null, dragBone = null, dragActive = false, ghostBone = null;
+let dragGuide = null, dragBone = null, dragActive = false, ghostBone = null;
 
-/* 目标虚影：在缺失骨头原位置显示半透明轮廓（拼图式引导） */
+/* 目标虚影：在缺失骨头原位置显示半透明轮廓（拼图式引导，唯一目标指示） */
 function showGhost(bone) {
   hideGhost();
   const src = bone.mesh;
@@ -453,7 +453,7 @@ function showGhost(bone) {
   clone.traverse(o => {
     if (o.isMesh) {
       o.visible = true;
-      o.material = new THREE.MeshBasicMaterial({ color: 0xdbe6ff, transparent: true, opacity: 0.28, depthWrite: false });
+      o.material = new THREE.MeshBasicMaterial({ color: 0xdbe6ff, transparent: true, opacity: 0.35, depthWrite: false });
     }
   });
   skeleton.add(clone);
@@ -462,18 +462,18 @@ function showGhost(bone) {
 function hideGhost() {
   if (ghostBone) { skeleton.remove(ghostBone); ghostBone = null; }
 }
+/* 虚影呼吸脉动（让目标更醒目） */
+function updateGhostPulse(dt) {
+  if (!ghostBone) return;
+  ghostBone.traverse(o => {
+    if (o.isMesh && o.material) {
+      o.material.opacity = 0.3 + Math.sin(performance.now() / 350) * 0.12;
+    }
+  });
+}
 function initDrag() {
-  if (targetMarker) return;
-  /* 目标标记：粉色脉冲圈（提示拖到哪） */
-  targetMarker = new THREE.Mesh(
-    new THREE.RingGeometry(0.08, 0.11, 32),
-    new THREE.MeshBasicMaterial({ color: 0xff5d8f, transparent: true, opacity: 0.95, side: THREE.DoubleSide, depthWrite: false, depthTest: false })
-  );
-  targetMarker.rotation.x = -Math.PI / 2;
-  targetMarker.frustumCulled = false;
-  targetMarker.renderOrder = 999;
-  scene.add(targetMarker);
-  /* 引导线：拖动时从手指位置指向目标，靠近变绿 */
+  if (dragGuide) return;
+  /* 引导线：拖动时从手指位置指向目标虚影，靠近变绿 */
   dragGuide = new Line2(
     new LineGeometry(),
     new LineMaterial({
@@ -487,21 +487,6 @@ function initDrag() {
   dragGuide.renderOrder = 999;
   dragGuide.visible = false;
   scene.add(dragGuide);
-}
-
-function updateTargetMarker() {
-  if (!targetMarker) return;
-  if (state !== ST.THROWING || !currentBone) { targetMarker.visible = false; return; }
-  const w = currentBone.mesh.getWorldPosition(new THREE.Vector3());
-  const n = worldToNdc(w);
-  if (Math.abs(n.x) < 0.92 && Math.abs(n.y) < 0.85) {
-    targetMarker.position.set(w.x, w.y, w.z);
-    targetMarker.visible = true;
-    const s = 1 + Math.sin(performance.now() / 300) * 0.15;
-    targetMarker.scale.setScalar(s);
-  } else {
-    targetMarker.visible = false;   // 目标出屏时由边缘箭头提示
-  }
 }
 
 function startThrow(bone) {
@@ -843,7 +828,7 @@ function animate(ts) {
     u.pts.material.opacity = 0.7 + Math.sin(u.t * 3) * 0.2;
   });
   updateRig(dt);
-  if (state === ST.THROWING) updateTargetMarker();
+  updateGhostPulse(dt);
   tick(dt);
   renderer.render(scene, camera);
 }
